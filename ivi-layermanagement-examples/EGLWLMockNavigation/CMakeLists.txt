@@ -53,6 +53,9 @@ include_directories(
     ${GLESv2_INCLUDE_DIRS}
     ${EGL_INCLUDE_DIRS}
     ${WAYLAND_CLIENT_INCLUDE_DIRS}
+    "${CMAKE_SOURCE_DIR}/ivi-layermanagement-api/ilmCommon/include"
+    "${CMAKE_SOURCE_DIR}/ivi-layermanagement-api/ilmClient/include"
+    "${CMAKE_SOURCE_DIR}/ivi-layermanagement-api/ilmControl/include"
 )
 
 link_directories(
@@ -113,6 +116,7 @@ set(LIBS
     ${WAYLAND_CLIENT_LIBRARIES}
     ${WAYLAND_EGL_LIBRARIES}
     ${EGL_LIBRARIES}
+    ilmCommon
 )
 
 SET( CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11" )

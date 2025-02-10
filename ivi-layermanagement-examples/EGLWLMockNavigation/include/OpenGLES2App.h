@@ -61,6 +61,8 @@ private:
 
     unsigned int GetTickCount();
 
+    void setupIviLayer(int width, int height);
+
 protected:
     float m_framesPerSecond;
     float m_animationSpeed;
@@ -84,7 +86,7 @@ public:
         struct wl_display* wlDisplay;
         struct wl_registry* wlRegistry;
         struct wl_compositor* wlCompositor;
-	struct wl_egl_window* wlNativeWindow;
+        struct wl_egl_window* wlNativeWindow;
         struct wl_surface* wlSurface;
         struct wl_shell* wlShell;
         struct wl_shell_surface* wlShellSurface;

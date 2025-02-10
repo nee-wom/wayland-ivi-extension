@@ -44,6 +44,9 @@ using std::endl;
 #include <sys/stat.h>
 #include <linux/fb.h>
 
+#include "ilm_control.h"
+
+unsigned int HMI_LAYER = 1000;
 
 extern "C"
 {
@@ -121,6 +124,34 @@ extern "C"
 
 #define RUNTIME_IN_MS() (GetTickCount() - startTimeInMS)
 
+static void shutdownCallbackFunction(t_ilm_shutdown_error_type error_type,
+                                     int errornum,
+                                     void *user_data)
+{
+    (void) user_data;
+
+    switch (error_type) {
+        case ILM_ERROR_WAYLAND:
+        {
+            printf("OpenGLES2App: exit, ilm shutdown due to wayland error: %s\n",
+                   strerror(errornum));
+            break;
+        }
+        case ILM_ERROR_POLL:
+        {
+            printf("OpenGLES2App: exit, ilm shutdown due to poll error: %s\n",
+                   strerror(errornum));
+            break;
+        }
+        default:
+        {
+            printf("OpenGLES2App: exit, ilm shutdown due to unknown reason: %s\n",
+                   strerror(errornum));
+        }
+    }
+
+    exit(1);
+}
 
 OpenGLES2App::OpenGLES2App(float fps, float animationSpeed, SurfaceConfiguration* config)
 : m_framesPerSecond(fps)
@@ -128,6 +159,11 @@ OpenGLES2App::OpenGLES2App(float fps, float animationSpeed, SurfaceConfiguration
 , m_timerIntervalInMs(1000.0 / m_framesPerSecond)
 , m_surfaceId(0)
 {
+    if (ilm_init() == ILM_FAILED) {
+        fprintf(stderr, "OpenGLES2App: ilm_init failed\n");
+    }
+    ilm_registerShutdownNotification(shutdownCallbackFunction, NULL);
+
     createWLContext(config);
     createEGLContext(config);
 
@@ -149,6 +185,8 @@ OpenGLES2App::OpenGLES2App(float fps, float animationSpeed, SurfaceConfiguration
 
 OpenGLES2App::~OpenGLES2App()
 {
+    ilm_unregisterNotification();
+    ilm_destroy();
     destroyEglContext();
     destroyWLContext();
 }
@@ -179,6 +217,80 @@ void OpenGLES2App::mainloop()
 
         frameEndTimeInMS = RUNTIME_IN_MS();
     }
+}
+
+static void configure_ilm_surface(t_ilm_uint id, t_ilm_uint width, t_ilm_uint height)
+{
+    ilm_surfaceSetDestinationRectangle(id, 0, 0, width, height);
+    ilm_surfaceSetSourceRectangle(id, 0, 0, width, height);
+    ilm_surfaceSetVisibility(id, ILM_TRUE);
+    ilm_layerAddSurface(HMI_LAYER, id);
+    ilm_surfaceRemoveNotification(id);
+
+    ilm_commitChanges();
+
+    printf("OpenGLES2App: surface (%u) configured with:\n"
+           "    dst region: x:0 y:0 w:%u h:%u\n"
+           "    src region: x:0 y:0 w:%u h:%u\n"
+           "    visibility: TRUE\n"
+           "    added to layer (%u)\n", id, width, height, width, height, HMI_LAYER);
+}
+
+static void ilmSurfaceCallback(t_ilm_uint id, struct ilmSurfaceProperties* sp, t_ilm_notification_mask m)
+{
+    if ((unsigned)m & ILM_NOTIFICATION_CONFIGURED)
+    {
+        printf("OpenGLES2App::surfaceCallback %d\n", id);
+        configure_ilm_surface(id, sp->origSourceWidth, sp->origSourceHeight);
+    }
+}
+
+static void ilmCallback(ilmObjectType object, t_ilm_uint id, t_ilm_bool created, void *user_data)
+{
+    (void)user_data;
+    struct ilmSurfaceProperties sp;
+
+    if (object == ILM_SURFACE) {
+        if (created) {
+            printf("OpenGLES2App::CB surface (%d) created\n",id);
+            // always get configured event to follow the surface changings
+            ilm_surfaceAddNotification(id, &ilmSurfaceCallback);
+            ilm_commitChanges();
+            ilm_getPropertiesOfSurface(id, &sp);
+
+            if ((sp.origSourceWidth != 0) && (sp.origSourceHeight !=0))
+            {
+                // surface is already configured
+                // happens if ivi-surface is created after initial swapBuffers
+                printf("OpenGLES2App::CB surface (%d) is already configured\n",id);
+                configure_ilm_surface(id, sp.origSourceWidth, sp.origSourceHeight);
+            }
+            else
+            {
+                printf("OpenGLES2App::CB surface (%d) waiting for configuration (initial wl_surface)\n",id);
+            }
+        }
+        else if(!created)
+            printf("OpenGLES2App::CB surface (%u) destroyed\n",id);
+    } else if (object == ILM_LAYER) {
+        if (created)
+            printf("OpenGLES2App::CB layer (%u) created\n",id);
+        else if(!created)
+            printf("OpenGLES2App::CB layer (%u) destroyed\n",id);
+    }
+}
+
+void OpenGLES2App::setupIviLayer(int width, int height)
+{
+    t_ilm_layer layer = HMI_LAYER;
+    t_ilm_display screenID = 0;
+    ilm_layerCreateWithDimension(&layer, width, height);
+    printf("OpenGLES2App: layer (%d) destination region: x:0 y:0 w:%u h:%u\n", layer, width, height);
+    ilm_layerSetVisibility(layer,ILM_TRUE);
+    printf("OpenGLES2App: layer (%d) visibility TRUE\n", layer);
+    ilm_displaySetRenderOrder(screenID, &layer, 1);
+    ilm_commitChanges();
+    ilm_registerNotification(ilmCallback, NULL);
 }
 
 bool OpenGLES2App::createWLContext(SurfaceConfiguration* config)
@@ -214,6 +326,7 @@ bool OpenGLES2App::createWLContext(SurfaceConfiguration* config)
         m_wlContextStruct.iviSurface = ivi_application_surface_create(m_wlContextStruct.iviApp,
                                                                   m_surfaceId,
                                                                   m_wlContextStruct.wlSurface);
+        setupIviLayer(width, height);
     } else if (m_wlContextStruct.wlShell) {
         m_wlContextStruct.wlShellSurface = wl_shell_get_shell_surface(m_wlContextStruct.wlShell,
                                                                       m_wlContextStruct.wlSurface);
