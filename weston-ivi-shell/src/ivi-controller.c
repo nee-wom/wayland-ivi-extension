@@ -94,6 +94,12 @@ struct screenshot_frame_listener {
 struct screen_id_info {
     char *screen_name;
     uint32_t screen_id;
+    uint32_t layer_id; // optional "default" layer for the display
+};
+
+struct surface_config {
+    uint32_t surface_id;
+    uint32_t layer_id;
 };
 
 static void
@@ -1582,6 +1588,26 @@ bind_ivi_controller(struct wl_client *client, void *data,
 }
 
 static void
+create_layer_for_screen(struct ivishell* shell, struct weston_output* output, uint32_t layer_id)
+{
+    const struct ivi_layout_interface *lyt = shell->interface;
+    int width = output->current_mode->width;
+    int height = output->current_mode->height;
+
+    struct ivi_layout_layer* layer = lyt->layer_create_with_dimension(layer_id, width, height);
+    if (!layer)
+    {
+        weston_log("Create layer %d for screen failed\n", layer_id);
+        return;
+    }
+    lyt->screen_add_layer(output, layer);
+    lyt->layer_set_destination_rectangle(layer, 0, 0, width, height);
+    lyt->layer_set_visibility(layer, true);
+    lyt->screen_set_render_order(output, &layer, 1);
+    lyt->commit_changes();
+}
+
+static void
 create_screen(struct ivishell *shell, struct weston_output *output)
 {
     struct iviscreen *iviscrn;
@@ -1600,6 +1626,8 @@ create_screen(struct ivishell *shell, struct weston_output *output)
         if(!strcmp(screen_info->screen_name, output->name))
         {
             id = screen_info->screen_id;
+            if (screen_info->layer_id != 0)
+                create_layer_for_screen(shell, output, screen_info->layer_id);
             break;
         }
     }
@@ -1878,6 +1906,33 @@ surface_event_remove(struct wl_listener *listener, void *data)
 }
 
 static void
+configure_predefined_surface(struct ivisurface* ivisurf)
+{
+    struct ivi_layout_surface* layout_surface = ivisurf->layout_surface;
+    const struct ivi_layout_interface *lyt = ivisurf->shell->interface;
+    uint32_t surface_id = lyt->get_id_of_surface(layout_surface);
+
+    struct surface_config *surface_config;
+    wl_array_for_each(surface_config, &ivisurf->shell->surface_configs) {
+        if (surface_id == surface_config->surface_id) {
+            struct weston_surface * w_surface = lyt->surface_get_weston_surface(layout_surface);
+            lyt->surface_set_source_rectangle(layout_surface, 0, 0, w_surface->width, w_surface->height);
+            lyt->surface_set_destination_rectangle(layout_surface, 0, 0, w_surface->width, w_surface->height);
+            lyt->surface_set_visibility(layout_surface, true);
+            struct ivi_layout_layer* layer = lyt->get_layer_from_id(surface_config->layer_id);
+            if (layer) {
+                lyt->layer_add_surface(layer, layout_surface);
+            } else {
+                weston_log("Layer %d for surface %d does not exist. Check config file.",
+                           surface_config->layer_id, surface_config->surface_id);
+            }
+            lyt->commit_changes();
+            break;
+        }
+    }
+}
+
+static void
 surface_event_configure(struct wl_listener *listener, void *data)
 {
     struct ivishell *shell = wl_container_of(listener, shell, surface_configured);
@@ -1925,6 +1980,8 @@ surface_event_configure(struct wl_listener *listener, void *data)
                                           w_surface->height);
         lyt->commit_changes();
     }
+
+    configure_predefined_surface(ivisurf);
 
     wl_list_for_each(not, &ivisurf->notification_list, layout_link) {
         ctrl = wl_resource_get_user_data(not->resource);
@@ -2018,11 +2075,61 @@ destroy_screen_ids(struct ivishell *shell)
 }
 
 static void
+get_screen_config(struct ivishell* shell, struct weston_config_section* section)
+{
+    struct screen_id_info *screen_info = NULL;
+    char *screen_name = NULL;
+    uint32_t screen_id = 0;
+    uint32_t layer_id = 0;
+    if (0 != weston_config_section_get_string(section, "screen-name",
+                          &screen_name, NULL))
+        return;
+
+    if (0 != weston_config_section_get_uint(section,
+                        "screen-id",
+                        &screen_id, 0))
+    {
+        free(screen_name);
+        return;
+    }
+
+    weston_config_section_get_uint(section, "layer-id", &layer_id, 0);
+
+    screen_info = wl_array_add(&shell->screen_ids,
+                   sizeof(*screen_info));
+    if(screen_info)
+    {
+        screen_info->screen_name = screen_name;
+        screen_info->screen_id = screen_id;
+        screen_info->layer_id = layer_id;
+    }
+}
+
+static void
+get_surface_config(struct ivishell* shell, struct weston_config_section* section)
+{
+    uint32_t surface_id;
+    uint32_t layerId;
+    if (0 != weston_config_section_get_uint(section, "surface-id", &surface_id, 0))
+        return;
+    if (0 != weston_config_section_get_uint(section, "layer-id", &layerId, 0))
+        return;
+
+    struct surface_config* surface_config = NULL;
+    surface_config = wl_array_add(&shell->surface_configs, sizeof(*surface_config));
+    if (surface_config)
+    {
+        weston_log("surface config: layer-id %u, surface-id:%u\n", layerId, surface_id);
+        surface_config->layer_id = layerId;
+        surface_config->surface_id = surface_id;
+    }
+}
+
+static void
 get_config(struct weston_compositor *compositor, struct ivishell *shell)
 {
 	struct weston_config_section *section = NULL;
 	struct weston_config *config = NULL;
-	struct screen_id_info *screen_info = NULL;
 	const char *name = NULL;
 
 	config = wet_get_config(compositor);
@@ -2058,33 +2165,13 @@ get_config(struct weston_compositor *compositor, struct ivishell *shell)
 	                   &shell->enable_cursor, false);
 
 	wl_array_init(&shell->screen_ids);
+	wl_array_init(&shell->surface_configs);
 
 	while (weston_config_next_section(config, &section, &name)) {
-		char *screen_name = NULL;
-		uint32_t screen_id = 0;
-
-		if (0 != strcmp(name, "ivi-screen"))
-			continue;
-
-		if (0 != weston_config_section_get_string(section, "screen-name",
-							  &screen_name, NULL))
-			continue;
-
-		if (0 != weston_config_section_get_uint(section,
-							"screen-id",
-							&screen_id, 0))
-		{
-			free(screen_name);
-			continue;
-		}
-
-		screen_info = wl_array_add(&shell->screen_ids,
-					   sizeof(*screen_info));
-		if(screen_info)
-		{
-			screen_info->screen_name = screen_name;
-			screen_info->screen_id = screen_id;
-		}
+		if (0 == strcmp(name, "ivi-screen"))
+			get_screen_config(shell, section);
+		else if (0 == strcmp(name, "ivi-surface"))
+			get_surface_config(shell, section);
 	}
 }
 

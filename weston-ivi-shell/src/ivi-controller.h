@@ -82,7 +82,8 @@ struct ivishell {
 
     struct wl_listener client_destroy_listener;
 
-    struct wl_array screen_ids;
+    struct wl_array screen_ids;      // maps output names to screen ids (config file)
+    struct wl_array surface_configs; // surface-layer mapping (config file)
     uint32_t screen_id_offset;
 
     int32_t bkgnd_surface_id;
