@@ -1850,10 +1850,11 @@ surface_event_create(struct wl_listener *listener, void *data)
     uint32_t id_surface = 0;
 
     id_surface = lyt->get_id_of_surface(layout_surface);
+    weston_log("surface_event_create %d\n", id_surface);
 
     ivisurf = create_surface(shell, layout_surface, id_surface);
     if (ivisurf == NULL) {
-        weston_log("failed to create surface");
+        weston_log("failed to create surface\n");
         return;
     }
 
@@ -1892,6 +1893,7 @@ surface_event_remove(struct wl_listener *listener, void *data)
     free(ivisurf);
 
     id_surface = shell->interface->get_id_of_surface(layout_surface);
+    weston_log("surface_event_remove %d\n", id_surface);
 
     if ((shell->bkgnd_surface_id == (int32_t)id_surface) &&
          shell->bkgnd_view) {
@@ -1989,6 +1991,56 @@ surface_event_configure(struct wl_listener *listener, void *data)
                            IVI_NOTIFICATION_CONFIGURE);
     }
 }
+
+static void
+desktop_surface_event_configure(struct wl_listener *listener, void *data)
+{
+    weston_log("desktop_surface_event_configure\n");
+    struct ivishell *shell = wl_container_of(listener, shell, desktop_surface_configured);
+    const struct ivi_layout_interface *lyt = shell->interface;
+    // struct ivisurface *ivisurf = NULL;
+    struct ivi_layout_surface *layout_surface =
+           (struct ivi_layout_surface *) data;
+    // struct ivicontroller *ctrl;
+    // struct notification *not;
+    uint32_t surface_id;
+    struct weston_surface *w_surface;
+
+    surface_id = lyt->get_id_of_surface(layout_surface);
+    const struct ivi_layout_surface_properties* prop = lyt->get_properties_of_surface(layout_surface);
+    weston_log("desktop_surface_event_configure id:%d vis:%d, src(%d %d) dst(%d %d)\n",
+               surface_id,
+               prop->visibility,
+               prop->source_width, prop->source_height,
+               prop->dest_width, prop->dest_height
+               );
+
+    w_surface = lyt->surface_get_weston_surface(layout_surface);
+    weston_log("w_surface(%d %d) out:%s\n", w_surface->width, w_surface->height,
+               w_surface->output ? w_surface->output->name : "");
+    lyt->surface_set_source_rectangle(layout_surface, 0, 0, w_surface->width, w_surface->height);
+    lyt->surface_set_destination_rectangle(layout_surface, 0, 0, w_surface->width, w_surface->height);
+
+    struct ivi_layout_layer* layout_layer = lyt->get_layer_from_id(10000);
+    if (!layout_layer)
+    {
+        weston_log("create layer 10000 for desktop surfaces\n");
+        struct iviscreen *iviscrn;
+        wl_list_for_each(iviscrn, &shell->list_screen, link) {
+            break;
+        }
+        if (!iviscrn) {
+            weston_log("no screen\n");
+            return;
+        }
+        create_layer_for_screen(shell, iviscrn->output, 10000);
+        layout_layer = lyt->get_layer_from_id(10000);
+    }
+    lyt->layer_add_surface(layout_layer, layout_surface);
+    lyt->surface_set_visibility(layout_surface, true);
+    lyt->commit_changes();
+}
+
 
 static int32_t
 check_layout_layers(struct ivishell *shell)
@@ -2198,6 +2250,7 @@ ivi_shell_destroy(struct wl_listener *listener, void *data)
 	wl_list_remove(&shell->output_destroyed.link);
 	wl_list_remove(&shell->output_resized.link);
 
+	wl_list_remove(&shell->desktop_surface_configured.link);
 	wl_list_remove(&shell->surface_configured.link);
 	wl_list_remove(&shell->surface_removed.link);
 	wl_list_remove(&shell->surface_created.link);
@@ -2262,10 +2315,12 @@ init_ivi_shell(struct weston_compositor *ec, struct ivishell *shell)
     shell->surface_created.notify = surface_event_create;
     shell->surface_removed.notify = surface_event_remove;
     shell->surface_configured.notify = surface_event_configure;
+    shell->desktop_surface_configured.notify = desktop_surface_event_configure;
 
     lyt->add_listener_create_surface(&shell->surface_created);
     lyt->add_listener_remove_surface(&shell->surface_removed);
     lyt->add_listener_configure_surface(&shell->surface_configured);
+    lyt->add_listener_configure_desktop_surface(&shell->desktop_surface_configured);
 
     shell->output_created.notify = output_created_event;
     shell->output_destroyed.notify = output_destroyed_event;
